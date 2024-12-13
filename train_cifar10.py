@@ -56,6 +56,23 @@ parser.add_argument('--use_sqrt_lambda_scheduler', action='store_true', help='us
 
 args = parser.parse_args()
 
+
+
+# Set a fixed seed for reproducibility
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    cudnn.deterministic = True  # Ensures reproducibility but might make training slower
+    cudnn.benchmark = False
+
+# Replace `42` with your desired seed value
+set_seed(7)
+
+
+
+
 initial_lambda = args.initial_lambda
 
 # Decide which scheduler to use
