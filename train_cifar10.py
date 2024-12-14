@@ -79,6 +79,14 @@ initial_lambda = args.initial_lambda
 use_cyclic_lambda_scheduler = args.use_lambda_scheduler and args.opt == "adamW"
 use_sqrt_lambda_scheduler = args.use_sqrt_lambda_scheduler and args.opt == "adamW"
 
+# Determine experiment type for logging
+if use_cyclic_lambda_scheduler:
+    experiment_type = "cosine_cyclic_decay"
+elif use_sqrt_lambda_scheduler:
+    experiment_type = "sqrt_decay"
+else:
+    experiment_type = "none"
+
 usewandb = not args.nowandb
 if usewandb:
     import wandb
@@ -300,12 +308,25 @@ def train(epoch):
     train_loss = 0
     correct = 0
     total = 0
+    grad_norm = 0.0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
         inputs, targets = inputs.to(device), targets.to(device)
         with torch.cuda.amp.autocast(enabled=use_amp):
             outputs = net(inputs)
             loss = criterion(outputs, targets)
         scaler.scale(loss).backward()
+        
+        # Measure gradient norm after backward call (last batch)
+        # We'll just do this for the last batch of the epoch for simplicity
+        if batch_idx == len(trainloader)-1:
+            with torch.no_grad():
+                total_grad_norm = 0.0
+                for p in net.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_grad_norm += param_norm.item() ** 2
+                grad_norm = total_grad_norm**0.5
+        
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad()
@@ -317,7 +338,15 @@ def train(epoch):
 
         progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
             % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
-    return train_loss/(batch_idx+1)
+    # Compute parameter norm at the end of the epoch
+    with torch.no_grad():
+        total_param_norm = 0.0
+        for p in net.parameters():
+            param_norm = p.data.norm(2)
+            total_param_norm += param_norm.item() ** 2
+        param_norm = total_param_norm**0.5
+
+    return train_loss/(batch_idx+1), grad_norm, param_norm
 
 def test(epoch):
     global best_acc
@@ -366,7 +395,7 @@ if usewandb:
 net.cuda()
 for epoch in range(start_epoch, args.n_epochs):
     start = time.time()
-    trainloss = train(epoch)
+    trainloss, grad_norm, param_norm = train(epoch)
     val_loss, acc = test(epoch)
     
     # Update lambda if a scheduler is used and optimizer is adamW
@@ -385,8 +414,17 @@ for epoch in range(start_epoch, args.n_epochs):
     list_acc.append(acc)
     
     if usewandb:
-        wandb.log({'epoch': epoch, 'train_loss': trainloss, 'val_loss': val_loss, "val_acc": acc, "lr": optimizer.param_groups[0]["lr"], 'weight_decay': optimizer.param_groups[0]["weight_decay"],
-        "epoch_time": time.time()-start})
+        wandb.log({'epoch': epoch, 
+                   'train_loss': trainloss, 
+                   'val_loss': val_loss, 
+                   'val_acc': acc, 
+                   'lr': optimizer.param_groups[0]["lr"], 
+                   'weight_decay': optimizer.param_groups[0]["weight_decay"],
+                   'grad_norm': grad_norm,
+                   'param_norm': param_norm,
+                   'epoch_time': time.time()-start,
+                   'experiment_type': experiment_type
+                  })
 
     with open(f'log/log_{args.net}_patch{args.patch}.csv', 'w') as f:
         writer = csv.writer(f, lineterminator='\n')
